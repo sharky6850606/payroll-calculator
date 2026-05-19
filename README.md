@@ -4,10 +4,18 @@ This Streamlit app calculates daily and total payroll hours from a biometric att
 
 The app processes only the worksheet named `Original record`. It scans repeated employee sections, reads clock-in and clock-out times, calculates worked hours in Python, writes the results into the green summary row for each employee, and creates a download file that contains only the updated `Original record` sheet.
 
+Supported upload formats include modern Excel files such as `.xlsx` and `.xlsm`, plus legacy biometric exports such as Excel 97-2003 `.xls`. Legacy formats are converted to `.xlsx` before processing.
+
 ## Install
 
 ```bash
 pip install -r requirements.txt
+```
+
+For legacy `.xls`, `.xlt`, `.xlsb`, and `.ods` uploads, install LibreOffice locally so the app can convert them:
+
+```bash
+winget install TheDocumentFoundation.LibreOffice
 ```
 
 ## Run Locally
@@ -34,9 +42,12 @@ To share this app with the payroll team, put these files in a GitHub repository:
 
 - `app.py`
 - `requirements.txt`
+- `packages.txt`
 - `README.md`
 
 Then go to Streamlit Community Cloud, create a new app, choose the GitHub repository, choose the branch, and set the app file to `app.py`.
+
+`packages.txt` tells Streamlit Community Cloud to install LibreOffice so Excel 97-2003 `.xls` biometric exports can be converted automatically.
 
 Important: once deployed to Streamlit Community Cloud, uploaded payroll workbooks are processed on Streamlit's hosted servers instead of only on your local computer. Do not upload sensitive payroll files there unless that is acceptable for your organization.
 
