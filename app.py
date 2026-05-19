@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import copy
+import shutil
+import subprocess
+import tempfile
 import re
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 from typing import Iterable
 
 import openpyxl
@@ -17,6 +21,96 @@ TARGET_SHEET = "Original record"
 OUTPUT_FILENAME = "payroll_original_record_updated.xlsx"
 TIME_RE = re.compile(r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)")
 GREEN_FILL = PatternFill(fill_type="solid", fgColor="70AD47")
+DIRECT_OPENPYXL_EXTENSIONS = {".xlsx", ".xlsm", ".xltx", ".xltm"}
+CONVERTIBLE_EXCEL_EXTENSIONS = {".xls", ".xlt", ".xlsb", ".ods"}
+ACCEPTED_UPLOAD_TYPES = [
+    "xlsx",
+    "xlsm",
+    "xltx",
+    "xltm",
+    "xls",
+    "xlt",
+    "xlsb",
+    "ods",
+]
+
+
+class WorkbookConversionError(RuntimeError):
+    pass
+
+
+def find_office_converter() -> str | None:
+    """Find LibreOffice/OpenOffice for converting legacy Excel formats."""
+    for command in ("soffice", "libreoffice"):
+        path = shutil.which(command)
+        if path:
+            return path
+
+    windows_paths = [
+        r"C:\Program Files\LibreOffice\program\soffice.exe",
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+        r"C:\Program Files\OpenOffice 4\program\soffice.exe",
+        r"C:\Program Files (x86)\OpenOffice 4\program\soffice.exe",
+    ]
+    for path in windows_paths:
+        if Path(path).exists():
+            return path
+
+    return None
+
+
+def convert_workbook_to_xlsx(uploaded_bytes: bytes, filename: str) -> bytes:
+    """Convert older Excel files to xlsx so openpyxl can preserve and edit the sheet."""
+    converter = find_office_converter()
+    if converter is None:
+        raise WorkbookConversionError(
+            "This Excel format needs LibreOffice for conversion. "
+            "Install LibreOffice locally, or redeploy the Streamlit app with packages.txt included."
+        )
+
+    suffix = Path(filename).suffix or ".xls"
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        input_path = temp_path / f"uploaded{suffix}"
+        input_path.write_bytes(uploaded_bytes)
+
+        result = subprocess.run(
+            [
+                converter,
+                "--headless",
+                "--convert-to",
+                "xlsx",
+                "--outdir",
+                str(temp_path),
+                str(input_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+
+        converted_files = list(temp_path.glob("*.xlsx"))
+        if result.returncode != 0 or not converted_files:
+            details = (result.stderr or result.stdout or "No converter details were returned.").strip()
+            raise WorkbookConversionError(f"Could not convert this Excel file to .xlsx. {details}")
+
+        return converted_files[0].read_bytes()
+
+
+def load_uploaded_workbook(uploaded_bytes: bytes, filename: str) -> openpyxl.Workbook:
+    extension = Path(filename).suffix.lower()
+
+    if extension in DIRECT_OPENPYXL_EXTENSIONS:
+        return openpyxl.load_workbook(BytesIO(uploaded_bytes))
+
+    if extension in CONVERTIBLE_EXCEL_EXTENSIONS:
+        converted_bytes = convert_workbook_to_xlsx(uploaded_bytes, filename)
+        return openpyxl.load_workbook(BytesIO(converted_bytes))
+
+    raise ValueError(
+        "Unsupported file type. Please upload an Excel workbook such as .xlsx, .xlsm, .xls, .xlsb, .xlt, or .ods."
+    )
 
 
 def extract_time_minutes(value: object) -> list[int]:
@@ -310,8 +404,8 @@ def keep_only_original_record(wb: openpyxl.Workbook) -> None:
             del wb[sheet_name]
 
 
-def calculate_payroll_workbook(uploaded_bytes: bytes) -> tuple[bytes, int]:
-    wb = openpyxl.load_workbook(BytesIO(uploaded_bytes))
+def calculate_payroll_workbook(uploaded_bytes: bytes, filename: str = "uploaded.xlsx") -> tuple[bytes, int]:
+    wb = load_uploaded_workbook(uploaded_bytes, filename)
 
     if TARGET_SHEET not in wb.sheetnames:
         raise ValueError(f'The workbook must contain a worksheet named exactly "{TARGET_SHEET}".')
@@ -338,14 +432,17 @@ def main() -> None:
     st.title("Payroll Calculator")
     st.write("Upload your biometric Excel file and download an updated workbook with calculated payroll hours.")
 
-    uploaded_file = st.file_uploader("Upload your biometric Excel file", type=["xlsx", "xlsm"])
+    uploaded_file = st.file_uploader("Upload your biometric Excel file", type=ACCEPTED_UPLOAD_TYPES)
 
     if uploaded_file is None:
         return
 
     try:
         with st.spinner("Processing Original record..."):
-            updated_file, processed_count = calculate_payroll_workbook(uploaded_file.getvalue())
+            updated_file, processed_count = calculate_payroll_workbook(
+                uploaded_file.getvalue(),
+                uploaded_file.name,
+            )
 
         if processed_count == 0:
             st.warning("No employee sections with date rows were found on Original record.")
@@ -359,6 +456,8 @@ def main() -> None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     except ValueError as exc:
+        st.error(str(exc))
+    except WorkbookConversionError as exc:
         st.error(str(exc))
     except Exception as exc:  # Streamlit should show a friendly message instead of a blank failure.
         st.error("The file could not be processed. Please check that it is a valid Excel workbook.")
